@@ -1,0 +1,18 @@
+# 카메라 테스트 이미지
+cam*.jpg
+cam*.npy
+
+# 로그/결과
+*.csv
+*.log
+
+# 인스톨러
+*.exe
+
+# 드라이버 폴더
+webcam driver/
+
+# Python 캐시
+__pycache__/
+*.pyc
+*.pyo
