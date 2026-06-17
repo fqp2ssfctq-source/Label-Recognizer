@@ -1,0 +1,87 @@
+{
+  "template_name": "NEW_TEMPLATE",
+  "img_size": [
+    1920,
+    1080
+  ],
+  "regions": [
+    {
+      "label": "P/N",
+      "type": "pn",
+      "rect": [
+        1024,
+        648,
+        147,
+        22
+      ],
+      "text": ""
+    },
+    {
+      "label": "제품 설명",
+      "type": "desc",
+      "rect": [
+        1021,
+        633,
+        194,
+        19
+      ],
+      "text": ""
+    },
+    {
+      "label": "S/N",
+      "type": "sn",
+      "rect": [
+        1084,
+        711,
+        140,
+        21
+      ],
+      "text": ""
+    },
+    {
+      "label": "바코드",
+      "type": "barcode",
+      "rect": [
+        1008,
+        728,
+        218,
+        27
+      ],
+      "text": ""
+    },
+    {
+      "label": "Class 1 Laser",
+      "type": "class1",
+      "rect": [
+        801,
+        713,
+        175,
+        24
+      ],
+      "text": ""
+    },
+    {
+      "label": "Certi. Mark",
+      "type": "certi",
+      "rect": [
+        801,
+        731,
+        109,
+        20
+      ],
+      "text": ""
+    },
+    {
+      "label": "회사 CI",
+      "type": "ci",
+      "rect": [
+        807,
+        636,
+        127,
+        38
+      ],
+      "text": ""
+    }
+  ],
+  "ref_image": "template test_ref.jpg"
+}

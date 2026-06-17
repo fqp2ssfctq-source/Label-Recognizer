@@ -1,6 +1,15 @@
 # 카메라 테스트 이미지
 cam*.jpg
 cam*.npy
+test_*.jpg
+new cam files/
+
+# 머신별 설정 (로컬 전용)
+.label_config.json
+
+# 세션 백업 (자동 생성)
+*_SESSION_BACKUP_*.pyw
+backup/
 
 # 로그/결과
 *.csv

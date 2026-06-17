@@ -1,0 +1,98 @@
+{
+  "template_name": "NEW_TEMPLATE",
+  "img_size": [
+    1920,
+    1080
+  ],
+  "regions": [
+    {
+      "label": "제품 설명",
+      "type": "desc",
+      "rect": [
+        987,
+        675,
+        174,
+        22
+      ],
+      "text": "1G Copper SFP 100m TAA"
+    },
+    {
+      "label": "P/N",
+      "type": "pn",
+      "rect": [
+        987,
+        694,
+        76,
+        17
+      ],
+      "text": "A7866925"
+    },
+    {
+      "label": "P/N bar code",
+      "type": "cust_0",
+      "rect": [
+        984,
+        714,
+        199,
+        20
+      ],
+      "text": "A7866925"
+    },
+    {
+      "label": "COO",
+      "type": "cust_1",
+      "rect": [
+        985,
+        737,
+        125,
+        19
+      ],
+      "text": "Made in Singapore"
+    },
+    {
+      "label": "S/N",
+      "type": "sn",
+      "rect": [
+        1141,
+        755,
+        93,
+        20
+      ],
+      "text": ""
+    },
+    {
+      "label": "S/N bar code",
+      "type": "cust_2",
+      "rect": [
+        1008,
+        782,
+        230,
+        19
+      ],
+      "text": ""
+    },
+    {
+      "label": "회사 CI",
+      "type": "ci",
+      "rect": [
+        834,
+        682,
+        135,
+        50
+      ],
+      "text": ""
+    },
+    {
+      "label": "Certi. Mark",
+      "type": "certi",
+      "rect": [
+        830,
+        779,
+        175,
+        34
+      ],
+      "text": ""
+    }
+  ],
+  "ref_image": "andrew template_ref.jpg"
+}
