@@ -989,50 +989,20 @@ class App(tk.Tk):
         result = [None]
 
         def _do_open():
-            import time as _t
-
-            def _try_open_with_fourcc(fourcc_str=None):
-                try:
-                    c = cv2.VideoCapture(idx, backend)
-                    if not c.isOpened():
-                        c.release()
-                        return None
-                    if fourcc_str:
-                        c.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc_str))
+            try:
+                c = cv2.VideoCapture(idx, backend)
+                if c.isOpened():
                     c.set(cv2.CAP_PROP_FRAME_WIDTH,  w)
                     c.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-                    # 유효 프레임 검증 (최대 10회)
-                    for _ in range(10):
-                        ret, frm = c.read()
-                        if ret and frm is not None and frm.mean() > 1.0:
-                            return c   # 정상 프레임 확인
+                    result[0] = c
+                else:
                     c.release()
-                    return None
-                except Exception:
-                    return None
-
-            # 1차: FOURCC 없이 자동 협상
-            cap = _try_open_with_fourcc(None)
-            if cap is not None:
-                result[0] = cap
-                return
-            _t.sleep(0.5)
-            # 2차: MJPG 강제
-            cap = _try_open_with_fourcc("MJPG")
-            if cap is not None:
-                result[0] = cap
-                return
-            _t.sleep(1.0)
-            # 3차: 마지막 재시도 (자동)
-            cap = _try_open_with_fourcc(None)
-            if cap is not None:
-                result[0] = cap
+            except Exception:
+                pass
 
         t = threading.Thread(target=_do_open, daemon=True)
         t.start()
-        # MSMF: 해상도 set에 ~6s + 재시도 시 +2s 여유
-        timeout = 20.0 if backend == cv2.CAP_MSMF else 5.0
-        t.join(timeout=timeout)
+        t.join(timeout=5.0)
 
         cap = result[0]
         if cap is None and t.is_alive():
@@ -2260,22 +2230,18 @@ class App(tk.Tk):
                 for idx in range(6):
                     result = [None]   # (backend, label_suffix)
                     def try_open(i=idx, r=result):
-                        # DSHOW 먼저 — 실행 중인 카메라와 충돌 없이 스캔 가능
-                        # MSMF는 독점 접근이라 현재 스트리밍 중일 때 열기 실패
-                        for bk, bk_name in ((cv2.CAP_DSHOW, "DSHOW"), (cv2.CAP_MSMF, "MSMF")):
-                            try:
-                                c = cv2.VideoCapture(i, bk)
-                                if not c.isOpened():
-                                    c.release(); continue
-                                import time as _t; _t.sleep(0.3)
-                                ret, _ = c.read()
-                                c.release()
-                                if ret:
-                                    # 실제 연결은 항상 MSMF로 (고해상도 안정적)
-                                    r[0] = (cv2.CAP_MSMF, "")
-                                    return
-                            except Exception:
-                                pass
+                        # DSHOW만 사용 — MSMF는 이 PC에서 동작 안 함
+                        try:
+                            c = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+                            if not c.isOpened():
+                                c.release(); return
+                            import time as _t; _t.sleep(0.3)
+                            ret, _ = c.read()
+                            c.release()
+                            if ret:
+                                r[0] = (cv2.CAP_DSHOW, "")
+                        except Exception:
+                            pass
                     t = threading.Thread(target=try_open, daemon=True)
                     t.start();  t.join(timeout=4.0)
                     if result[0]:
