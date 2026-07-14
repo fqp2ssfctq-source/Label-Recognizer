@@ -989,23 +989,29 @@ class App(tk.Tk):
         result = [None]
 
         def _do_open():
-            try:
-                c = cv2.VideoCapture(idx, backend)
-                if c.isOpened():
-                    if backend == cv2.CAP_MSMF:
-                        c.set(cv2.CAP_PROP_FOURCC,
-                              cv2.VideoWriter_fourcc(*'MJPG'))
-                    c.set(cv2.CAP_PROP_FRAME_WIDTH,  w)
-                    c.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-                    result[0] = c
-                else:
-                    c.release()
-            except Exception:
-                pass
+            import time as _t
+            for attempt in range(2):
+                try:
+                    c = cv2.VideoCapture(idx, backend)
+                    if c.isOpened():
+                        if backend == cv2.CAP_MSMF:
+                            c.set(cv2.CAP_PROP_FOURCC,
+                                  cv2.VideoWriter_fourcc(*'MJPG'))
+                        c.set(cv2.CAP_PROP_FRAME_WIDTH,  w)
+                        c.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+                        result[0] = c
+                        return
+                    else:
+                        c.release()
+                except Exception:
+                    pass
+                if attempt == 0:
+                    _t.sleep(2.0)   # 첫 번째 실패 후 2초 대기 후 재시도
 
         t = threading.Thread(target=_do_open, daemon=True)
         t.start()
-        timeout = 15.0 if backend == cv2.CAP_MSMF else 3.0
+        # MSMF: 해상도 set에 ~6s + 재시도 시 +2s 여유
+        timeout = 20.0 if backend == cv2.CAP_MSMF else 5.0
         t.join(timeout=timeout)
 
         cap = result[0]
