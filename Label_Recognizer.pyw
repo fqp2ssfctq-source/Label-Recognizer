@@ -991,6 +991,9 @@ class App(tk.Tk):
             try:
                 c = cv2.VideoCapture(idx, backend)
                 if c.isOpened():
+                    if backend == cv2.CAP_MSMF:
+                        c.set(cv2.CAP_PROP_FOURCC,
+                              cv2.VideoWriter_fourcc(*'MJPG'))
                     c.set(cv2.CAP_PROP_FRAME_WIDTH,  w)
                     c.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
                     result[0] = c
@@ -2233,19 +2236,30 @@ class App(tk.Tk):
                 ps_names = App._get_ps_cam_names()
                 found = [];  ps_i = 0
                 for idx in range(6):
-                    ok = [False]
-                    def try_open(i=idx, r=ok):
-                        try:
-                            c = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-                            if c.isOpened():
-                                c.release();  r[0] = True
-                        except Exception:
-                            pass
+                    result = [None]   # (backend, label_suffix)
+                    def try_open(i=idx, r=result):
+                        for bk, bk_name in ((cv2.CAP_DSHOW, "DSHOW"), (cv2.CAP_MSMF, "MSMF")):
+                            try:
+                                c = cv2.VideoCapture(i, bk)
+                                if not c.isOpened():
+                                    c.release(); continue
+                                if bk == cv2.CAP_MSMF:
+                                    c.set(cv2.CAP_PROP_FOURCC,
+                                          cv2.VideoWriter_fourcc(*'MJPG'))
+                                import time as _t; _t.sleep(0.3)
+                                ret, _ = c.read()
+                                c.release()
+                                if ret:
+                                    r[0] = (bk, "" if bk_name == "DSHOW" else f" [{bk_name}]")
+                                    return
+                            except Exception:
+                                pass
                     t = threading.Thread(target=try_open, daemon=True)
-                    t.start();  t.join(timeout=1.5)
-                    if ok[0]:
+                    t.start();  t.join(timeout=4.0)
+                    if result[0]:
+                        bk, suffix = result[0]
                         name = ps_names.get(ps_i, f"CAM {idx}")
-                        found.append((idx, cv2.CAP_DSHOW, f"  {idx} — {name}"))
+                        found.append((idx, bk, f"  {idx} — {name}{suffix}"))
                         ps_i += 1
 
                 def _update():
