@@ -994,9 +994,8 @@ class App(tk.Tk):
                 try:
                     c = cv2.VideoCapture(idx, backend)
                     if c.isOpened():
-                        if backend == cv2.CAP_MSMF:
-                            c.set(cv2.CAP_PROP_FOURCC,
-                                  cv2.VideoWriter_fourcc(*'MJPG'))
+                        # FOURCC를 강제하지 않음 — MSMF가 해상도에 맞는
+                        # 포맷을 자동 협상 (Windows 카메라 앱과 동일한 방식)
                         c.set(cv2.CAP_PROP_FRAME_WIDTH,  w)
                         c.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
                         result[0] = c
@@ -2238,19 +2237,17 @@ class App(tk.Tk):
                 for idx in range(6):
                     result = [None]   # (backend, label_suffix)
                     def try_open(i=idx, r=result):
-                        for bk, bk_name in ((cv2.CAP_DSHOW, "DSHOW"), (cv2.CAP_MSMF, "MSMF")):
+                        # MSMF를 먼저 시도 — 1920×1080 고해상도에서 더 안정적
+                        for bk, bk_name in ((cv2.CAP_MSMF, "MSMF"), (cv2.CAP_DSHOW, "DSHOW")):
                             try:
                                 c = cv2.VideoCapture(i, bk)
                                 if not c.isOpened():
                                     c.release(); continue
-                                if bk == cv2.CAP_MSMF:
-                                    c.set(cv2.CAP_PROP_FOURCC,
-                                          cv2.VideoWriter_fourcc(*'MJPG'))
                                 import time as _t; _t.sleep(0.3)
                                 ret, _ = c.read()
                                 c.release()
                                 if ret:
-                                    r[0] = (bk, "" if bk_name == "DSHOW" else f" [{bk_name}]")
+                                    r[0] = (bk, "" if bk_name == "MSMF" else f" [{bk_name}]")
                                     return
                             except Exception:
                                 pass
