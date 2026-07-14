@@ -990,22 +990,43 @@ class App(tk.Tk):
 
         def _do_open():
             import time as _t
-            for attempt in range(2):
+
+            def _try_open_with_fourcc(fourcc_str=None):
                 try:
                     c = cv2.VideoCapture(idx, backend)
-                    if c.isOpened():
-                        # FOURCC를 강제하지 않음 — MSMF가 해상도에 맞는
-                        # 포맷을 자동 협상 (Windows 카메라 앱과 동일한 방식)
-                        c.set(cv2.CAP_PROP_FRAME_WIDTH,  w)
-                        c.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-                        result[0] = c
-                        return
-                    else:
+                    if not c.isOpened():
                         c.release()
+                        return None
+                    if fourcc_str:
+                        c.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc_str))
+                    c.set(cv2.CAP_PROP_FRAME_WIDTH,  w)
+                    c.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+                    # 유효 프레임 검증 (최대 10회)
+                    for _ in range(10):
+                        ret, frm = c.read()
+                        if ret and frm is not None and frm.mean() > 1.0:
+                            return c   # 정상 프레임 확인
+                    c.release()
+                    return None
                 except Exception:
-                    pass
-                if attempt == 0:
-                    _t.sleep(2.0)   # 첫 번째 실패 후 2초 대기 후 재시도
+                    return None
+
+            # 1차: FOURCC 없이 자동 협상
+            cap = _try_open_with_fourcc(None)
+            if cap is not None:
+                result[0] = cap
+                return
+            _t.sleep(0.5)
+            # 2차: MJPG 강제
+            cap = _try_open_with_fourcc("MJPG")
+            if cap is not None:
+                result[0] = cap
+                return
+            _t.sleep(1.0)
+            # 3차: 마지막 재시도 (자동)
+            cap = _try_open_with_fourcc(None)
+            if cap is not None:
+                result[0] = cap
 
         t = threading.Thread(target=_do_open, daemon=True)
         t.start()
@@ -1032,7 +1053,9 @@ class App(tk.Tk):
         self._btn_stop.configure(state="normal")
         rw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         rh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self._status(f"CAM {idx} 스트리밍 중... {rw}×{rh}")
+        fv = int(cap.get(cv2.CAP_PROP_FOURCC))
+        fc = "".join(chr((fv >> (8*i)) & 0xFF) for i in range(4)).strip('\x00') or "?"
+        self._status(f"CAM {idx} 스트리밍 중... {rw}×{rh}  포맷:{fc}")
         threading.Thread(target=self._cam_reader, daemon=True).start()
         self.after(33, self._cam_display)
         self._start_tracking()
@@ -2237,8 +2260,9 @@ class App(tk.Tk):
                 for idx in range(6):
                     result = [None]   # (backend, label_suffix)
                     def try_open(i=idx, r=result):
-                        # MSMF를 먼저 시도 — 1920×1080 고해상도에서 더 안정적
-                        for bk, bk_name in ((cv2.CAP_MSMF, "MSMF"), (cv2.CAP_DSHOW, "DSHOW")):
+                        # DSHOW 먼저 — 실행 중인 카메라와 충돌 없이 스캔 가능
+                        # MSMF는 독점 접근이라 현재 스트리밍 중일 때 열기 실패
+                        for bk, bk_name in ((cv2.CAP_DSHOW, "DSHOW"), (cv2.CAP_MSMF, "MSMF")):
                             try:
                                 c = cv2.VideoCapture(i, bk)
                                 if not c.isOpened():
@@ -2247,7 +2271,8 @@ class App(tk.Tk):
                                 ret, _ = c.read()
                                 c.release()
                                 if ret:
-                                    r[0] = (bk, "" if bk_name == "MSMF" else f" [{bk_name}]")
+                                    # 실제 연결은 항상 MSMF로 (고해상도 안정적)
+                                    r[0] = (cv2.CAP_MSMF, "")
                                     return
                             except Exception:
                                 pass
