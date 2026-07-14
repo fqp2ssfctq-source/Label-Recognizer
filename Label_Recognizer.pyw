@@ -1079,10 +1079,10 @@ class App(tk.Tk):
 
     def _cam_reader(self):
         import time as _time
-        fail   = 0
-        warmup = 15
-        _min_interval = 1 / 20   # 20fps 상한
-        _last_t = 0.0
+        fail      = 0
+        warmup    = 15
+        _interval = 1 / 20   # 20fps 상한
+        _last_t   = -999.0
         try:
             while self.cam_running and self.cap is not None:
                 ret, frame = self.cap.read()
@@ -1100,10 +1100,9 @@ class App(tk.Tk):
                 if mean < 2.0 or mean > 253.0:
                     continue
                 now = _time.monotonic()
-                if now - _last_t < _min_interval:
-                    _time.sleep(_min_interval - (now - _last_t))
-                    continue
-                _last_t = _time.monotonic()
+                if now - _last_t < _interval:
+                    continue          # 이번 프레임 스킵, 다음 cap.read()로
+                _last_t = now
                 self._latest_frame = frame
                 self._frame_count  = getattr(self, "_frame_count", 0) + 1
         except Exception as e:
