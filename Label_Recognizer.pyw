@@ -2258,7 +2258,7 @@ class App(tk.Tk):
                         # 내장 카메라가 아닌 첫 번째 항목 자동 선택
                         auto = next(
                             (li for li, (_, _, lbl) in enumerate(found)
-                             if not any(k in lbl.lower() for k in ("lg", "built", "internal", "integrated"))),
+                             if not any(k in lbl.lower() for k in ("lg", "built", "internal", "integrated", "webcam", "web cam", "hd cam", "face", "ir camera"))),
                             0)
                         lb.selection_set(auto)
                         lb.see(auto)
