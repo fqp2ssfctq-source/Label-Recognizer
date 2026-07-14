@@ -955,37 +955,13 @@ class App(tk.Tk):
     def _on_res_change(self):
         if not self.cam_running:
             return
-        if not isinstance(self._current_cam_idx, str):
-            rs = self._res_var.get().replace("×", "x")
-            w, h = map(int, rs.split("x"))
-            self._cam_res = (w, h)
-            backend = getattr(self, "_current_cam_backend", cv2.CAP_DSHOW)
-            self._stop_camera()
-            self.after(400, lambda: self._start_camera(
-                self._current_cam_idx, self._cam_fmt, (w, h), backend))
-            return
-        import urllib.request as _ur
-        from urllib.parse import urlparse
-        rs     = self._res_var.get().replace("×", "x")
-        parsed = urlparse(self._current_cam_idx)
-        base   = f"{parsed.scheme}://{parsed.netloc}"
-        def _send():
-            try:
-                _ur.urlopen(f"{base}/settings/video_size?set={rs}", timeout=3)
-                self.after(0, lambda: self._status(f"해상도 {rs} 적용"))
-                self.after(800, self._reconnect_ip)
-            except Exception as e:
-                self.after(0, lambda err=str(e): self._status(f"해상도 변경 실패: {err}"))
-        threading.Thread(target=_send, daemon=True).start()
-
-    def _reconnect_ip(self):
-        if not isinstance(self._current_cam_idx, str):
-            return
-        url  = self._current_cam_idx
-        w, h = map(int, self._res_var.get().replace("×", "x").split("x"))
+        rs = self._res_var.get().replace("×", "x")
+        w, h = map(int, rs.split("x"))
         self._cam_res = (w, h)
+        backend = getattr(self, "_current_cam_backend", cv2.CAP_DSHOW)
         self._stop_camera()
-        self._start_camera(url, self._cam_fmt, (w, h))
+        self.after(400, lambda: self._start_camera(
+            self._current_cam_idx, self._cam_fmt, (w, h), backend))
 
     # ── 카메라 ────────────────────────────────────
     def _start_camera(self, idx=0, fmt="YUY2", res=(640, 480), backend=cv2.CAP_DSHOW):
@@ -994,11 +970,8 @@ class App(tk.Tk):
         self._static_bgr = None
         self._btn_cam.configure(state="disabled")
         self._btn_stop.configure(state="disabled")
-        if isinstance(idx, str):
-            self._status(f"IP 카메라 연결 중... {idx}")
-        else:
-            bname = "MSMF" if backend == cv2.CAP_MSMF else "DSHOW"
-            self._status(f"CAM {idx} [{bname}] 연결 중...")
+        bname = "MSMF" if backend == cv2.CAP_MSMF else "DSHOW"
+        self._status(f"CAM {idx} [{bname}] 연결 중...")
         threading.Thread(target=self._open_camera_bg,
                          args=(idx, res, backend), daemon=True).start()
 
@@ -1011,17 +984,15 @@ class App(tk.Tk):
             return []
 
     def _open_camera_bg(self, idx, res=(640, 480), backend=cv2.CAP_DSHOW):
-        w, h    = res
-        result  = [None]
-        is_url  = isinstance(idx, str)
+        w, h   = res
+        result = [None]
 
         def _do_open():
             try:
-                c = cv2.VideoCapture(idx) if is_url else cv2.VideoCapture(idx, backend)
+                c = cv2.VideoCapture(idx, backend)
                 if c.isOpened():
-                    if not is_url:
-                        c.set(cv2.CAP_PROP_FRAME_WIDTH,  w)
-                        c.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+                    c.set(cv2.CAP_PROP_FRAME_WIDTH,  w)
+                    c.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
                     result[0] = c
                 else:
                     c.release()
@@ -1030,7 +1001,7 @@ class App(tk.Tk):
 
         t = threading.Thread(target=_do_open, daemon=True)
         t.start()
-        timeout = 20.0 if is_url else (6.0 if backend == cv2.CAP_MSMF else 3.0)
+        timeout = 6.0 if backend == cv2.CAP_MSMF else 3.0
         t.join(timeout=timeout)
 
         cap = result[0]
@@ -2191,46 +2162,11 @@ class App(tk.Tk):
         win = tk.Toplevel(self)
         win.title("카메라 연결")
         win.configure(bg=CLR["bg"])
-        win.geometry("480x280")
+        win.geometry("480x200")
         win.resizable(False, False)
         win.grab_set()
 
-        ip_fr = tk.LabelFrame(win, text=" 📱  IP 카메라 (스마트폰 / IP Webcam 앱) ",
-                              font=FONT_SMALL, fg=CLR["accent"],
-                              bg=CLR["bg"], bd=1)
-        ip_fr.pack(fill="x", padx=14, pady=(12, 6))
-
-        url_row = tk.Frame(ip_fr, bg=CLR["bg"])
-        url_row.pack(fill="x", padx=8, pady=8)
-        url_row.columnconfigure(0, weight=1)
-
-        _last_url = getattr(self, "_last_ip_url", "http://192.168.0.x:8080/video")
-        url_var   = tk.StringVar(value=_last_url)
-        url_entry = tk.Entry(url_row, textvariable=url_var, font=FONT_BODY,
-                             bg=CLR["btn"], fg=CLR["text"],
-                             insertbackground=CLR["text"], relief="flat")
-        url_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8), ipady=4)
-
-        def on_ip_connect():
-            url = url_var.get().strip()
-            if not url.startswith("http"):
-                messagebox.showwarning("경고", "http://로 시작하는 URL을 입력해주세요.", parent=win)
-                return
-            self._last_ip_url = url
-            win.destroy()
-            self._stop_camera()
-            self._stop_video()
-            self._start_camera(url, self._fmt_var.get(), self._cam_res)
-
-        self._btn(url_row, "🔗  연결", on_ip_connect, accent=True).grid(row=0, column=1)
-        tk.Label(ip_fr, text="예) http://192.168.0.10:8080/video",
-                 font=FONT_SMALL, fg=CLR["subtext"], bg=CLR["bg"]).pack(
-            anchor="w", padx=8, pady=(0, 6))
-
-        url_entry.focus_set()
-        url_entry.bind("<Return>", lambda e: on_ip_connect())
-
-        usb_fr = tk.LabelFrame(win, text=" 🖥  USB / OBS Virtual Camera ",
+        usb_fr = tk.LabelFrame(win, text=" 🖥  USB 카메라 ",
                                font=FONT_SMALL, fg=CLR["subtext"],
                                bg=CLR["bg"], bd=1)
         usb_fr.pack(fill="x", padx=14, pady=(0, 6))
@@ -2363,10 +2299,8 @@ class App(tk.Tk):
             "fmt":         self._fmt_var.get(),
             "res":         self._res_var.get(),
             "rotate":      self._rotate,
-            "last_ip_url": getattr(self, "_last_ip_url", ""),
-            "cam_type":    "ip" if isinstance(idx, str) else "index",
-            "cam_url":     idx  if isinstance(idx, str) else "",
-            "cam_idx":     0    if isinstance(idx, str) else idx,
+            "cam_type":    "index",
+            "cam_idx":     idx if isinstance(idx, int) else 0,
             "cam_backend": int(getattr(self, "_current_cam_backend", cv2.CAP_DSHOW)),
             "tmpl_path":   self.tmpl.path if self.tmpl.loaded else "",
         }
@@ -2386,7 +2320,6 @@ class App(tk.Tk):
             self._res_var.set(cfg.get("res", "640×480"))
             self._rotate = cfg.get("rotate", 0)
             self._lbl_rotate.configure(text=f"{self._rotate}°")
-            self._last_ip_url  = cfg.get("last_ip_url", "http://192.168.0.x:8080/video")
             self._last_cam_cfg = cfg
             # 마지막 템플릿 자동 로드
             tmpl_path = cfg.get("tmpl_path", "")
@@ -2427,10 +2360,7 @@ class App(tk.Tk):
             w, h = 640, 480
         self._cam_fmt = fmt
         self._cam_res = (w, h)
-        if cam_type == "ip" and cam_url:
-            self._status(f"이전 카메라 자동 연결 중... {cam_url}")
-            self.after(1200, lambda: self._start_camera(cam_url, fmt, (w, h)))
-        elif cam_type == "index":
+        if cam_type == "index":
             self._status(f"이전 카메라 자동 연결 중... CAM {cam_idx}")
             self.after(1200, lambda ci=cam_idx, f=fmt, r=(w, h), b=cam_backend:
                        self._start_camera(ci, f, r, b))
