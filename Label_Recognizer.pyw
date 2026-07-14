@@ -2162,22 +2162,22 @@ class App(tk.Tk):
         win = tk.Toplevel(self)
         win.title("카메라 연결")
         win.configure(bg=CLR["bg"])
-        win.geometry("480x200")
+        win.geometry("480x220")
         win.resizable(False, False)
         win.grab_set()
 
         usb_fr = tk.LabelFrame(win, text=" 🖥  USB 카메라 ",
-                               font=FONT_SMALL, fg=CLR["subtext"],
+                               font=FONT_SMALL, fg=CLR["accent"],
                                bg=CLR["bg"], bd=1)
-        usb_fr.pack(fill="x", padx=14, pady=(0, 6))
+        usb_fr.pack(fill="x", padx=14, pady=(12, 6))
 
         usb_row = tk.Frame(usb_fr, bg=CLR["bg"])
         usb_row.pack(fill="x", padx=8, pady=8)
 
         _cam_map = {}
         lb = tk.Listbox(usb_row, font=FONT_SMALL, bg=CLR["btn"], fg=CLR["text"],
-                        selectbackground=CLR["btn_on"], selectforeground=CLR["text"],
-                        relief="flat", height=3, activestyle="none", bd=0, width=40)
+                        selectbackground=CLR["accent"], selectforeground="#FFFFFF",
+                        relief="flat", height=4, activestyle="none", bd=0, width=40)
         lb.pack(side="left", fill="x", expand=True, padx=(0, 6))
         lb.insert("end", "  ( 스캔 버튼을 눌러 검색 )")
 
@@ -2231,7 +2231,13 @@ class App(tk.Tk):
                     if found:
                         for li, (ci, bk, lbl) in enumerate(found):
                             lb.insert("end", lbl);  _cam_map[li] = (ci, bk)
-                        lb.selection_set(0)
+                        # 내장 카메라가 아닌 첫 번째 항목 자동 선택
+                        auto = next(
+                            (li for li, (_, _, lbl) in enumerate(found)
+                             if not any(k in lbl.lower() for k in ("lg", "built", "internal", "integrated"))),
+                            0)
+                        lb.selection_set(auto)
+                        lb.see(auto)
                     else:
                         lb.insert("end", "  카메라 없음")
                     btn_scan.configure(state="normal", text="🔍 스캔")
