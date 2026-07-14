@@ -1115,27 +1115,14 @@ class App(tk.Tk):
         frame = self._latest_frame
         if frame is not None:
             frame = self._apply_transform(frame)
-            self.current_bgr   = frame   # 검사용 풀 해상도 보존
+            self.current_bgr   = frame
             self._latest_frame = None
             try:
-                # 디스플레이용 다운스케일 (캔버스 크기에 맞게 미리 축소)
-                fh, fw = frame.shape[:2]
-                cw = self._canvas.winfo_width()  or self.PREVIEW_W
-                ch = self._canvas.winfo_height() or self.PREVIEW_H
-                ds = min(cw / fw, ch / fh)
-                if ds < 0.9:
-                    disp = cv2.resize(frame, (int(fw * ds), int(fh * ds)),
-                                      interpolation=cv2.INTER_AREA)
-                    disp_H = None
-                    if self._track_H is not None:
-                        S = np.array([[ds, 0, 0], [0, ds, 0], [0, 0, 1]], np.float64)
-                        disp_H = S @ self._track_H
-                else:
-                    disp, disp_H = frame, self._track_H
-                self._show_frame(disp, tmpl_preview=self.tmpl.loaded, disp_H=disp_H)
+                h, w = frame.shape[:2]
+                self._show_frame(frame, tmpl_preview=self.tmpl.loaded)
                 fc = getattr(self, "_frame_count", 0)
                 zoom_str = f"  줌:{self._zoom:.1f}×" if self._zoom > 1.0 else ""
-                self._status(f"스트리밍 중... {fw}×{fh}  밝기:{int(frame.mean())}  프레임:{fc}{zoom_str}")
+                self._status(f"스트리밍 중... {w}×{h}  밝기:{int(frame.mean())}  프레임:{fc}{zoom_str}")
             except Exception as e:
                 self._status(f"표시 오류: {e}")
         self._after_id = self.after(50, self._cam_display)
@@ -1215,6 +1202,16 @@ class App(tk.Tk):
             bgr = cv2.cvtColor(bgr, cv2.COLOR_GRAY2BGR)
         elif bgr.ndim == 3 and bgr.shape[2] == 4:
             bgr = bgr[:, :, :3]
+
+        # 캔버스 크기로 early downscale — 이후 모든 연산을 작은 이미지에서 수행
+        cw = self._canvas.winfo_width()
+        ch = self._canvas.winfo_height()
+        if cw > 1 and ch > 1:
+            fh0, fw0 = bgr.shape[:2]
+            ds = min(cw / fw0, ch / fh0)
+            if ds < 0.95:
+                bgr = cv2.resize(bgr, (int(fw0 * ds), int(fh0 * ds)),
+                                 interpolation=cv2.INTER_AREA)
 
         rgb = cv2.cvtColor(bgr.copy(), cv2.COLOR_BGR2RGB)
 
