@@ -971,7 +971,8 @@ class App(tk.Tk):
         self._btn_cam.configure(state="disabled")
         self._btn_stop.configure(state="disabled")
         bname = "MSMF" if backend == cv2.CAP_MSMF else "DSHOW"
-        self._status(f"CAM {idx} [{bname}] 연결 중...")
+        wait  = "  (~10초 소요)" if backend == cv2.CAP_MSMF else ""
+        self._status(f"CAM {idx} [{bname}] 연결 중...{wait}")
         threading.Thread(target=self._open_camera_bg,
                          args=(idx, res, backend), daemon=True).start()
 
@@ -1004,7 +1005,7 @@ class App(tk.Tk):
 
         t = threading.Thread(target=_do_open, daemon=True)
         t.start()
-        timeout = 6.0 if backend == cv2.CAP_MSMF else 3.0
+        timeout = 15.0 if backend == cv2.CAP_MSMF else 3.0
         t.join(timeout=timeout)
 
         cap = result[0]
