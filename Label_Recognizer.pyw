@@ -1075,8 +1075,11 @@ class App(tk.Tk):
         self._tracking = False
 
     def _cam_reader(self):
+        import time as _time
         fail   = 0
         warmup = 15
+        _min_interval = 1 / 20   # 20fps 상한
+        _last_t = 0.0
         try:
             while self.cam_running and self.cap is not None:
                 ret, frame = self.cap.read()
@@ -1084,6 +1087,7 @@ class App(tk.Tk):
                     fail += 1
                     if fail >= 30:
                         self.after(0, lambda: self._status("프레임 없음 — 재연결 필요"))
+                    _time.sleep(0.01)
                     continue
                 fail = 0
                 if warmup > 0:
@@ -1092,6 +1096,11 @@ class App(tk.Tk):
                 mean = frame.mean()
                 if mean < 2.0 or mean > 253.0:
                     continue
+                now = _time.monotonic()
+                if now - _last_t < _min_interval:
+                    _time.sleep(_min_interval - (now - _last_t))
+                    continue
+                _last_t = _time.monotonic()
                 self._latest_frame = frame
                 self._frame_count  = getattr(self, "_frame_count", 0) + 1
         except Exception as e:
@@ -1103,17 +1112,30 @@ class App(tk.Tk):
         frame = self._latest_frame
         if frame is not None:
             frame = self._apply_transform(frame)
-            self.current_bgr   = frame
+            self.current_bgr   = frame   # 검사용 풀 해상도 보존
             self._latest_frame = None
             try:
-                self._show_frame(frame, tmpl_preview=self.tmpl.loaded)
-                h, w = frame.shape[:2]
-                fc   = getattr(self, "_frame_count", 0)
+                # 디스플레이용 다운스케일 (캔버스 크기에 맞게 미리 축소)
+                fh, fw = frame.shape[:2]
+                cw = self._canvas.winfo_width()  or self.PREVIEW_W
+                ch = self._canvas.winfo_height() or self.PREVIEW_H
+                ds = min(cw / fw, ch / fh)
+                if ds < 0.9:
+                    disp = cv2.resize(frame, (int(fw * ds), int(fh * ds)),
+                                      interpolation=cv2.INTER_AREA)
+                    disp_H = None
+                    if self._track_H is not None:
+                        S = np.array([[ds, 0, 0], [0, ds, 0], [0, 0, 1]], np.float64)
+                        disp_H = S @ self._track_H
+                else:
+                    disp, disp_H = frame, self._track_H
+                self._show_frame(disp, tmpl_preview=self.tmpl.loaded, disp_H=disp_H)
+                fc = getattr(self, "_frame_count", 0)
                 zoom_str = f"  줌:{self._zoom:.1f}×" if self._zoom > 1.0 else ""
-                self._status(f"스트리밍 중... {w}×{h}  밝기:{int(frame.mean())}  프레임:{fc}{zoom_str}")
+                self._status(f"스트리밍 중... {fw}×{fh}  밝기:{int(frame.mean())}  프레임:{fc}{zoom_str}")
             except Exception as e:
                 self._status(f"표시 오류: {e}")
-        self._after_id = self.after(33, self._cam_display)
+        self._after_id = self.after(50, self._cam_display)
 
     # ── 파일 열기 ────────────────────────────────
     def _open_file(self):
@@ -1185,7 +1207,7 @@ class App(tk.Tk):
         self._video_after_id = self.after(self._video_delay, self._video_loop)
 
     # ── 프레임 표시 ──────────────────────────────
-    def _show_frame(self, bgr, result_regions=None, tmpl_preview=False):
+    def _show_frame(self, bgr, result_regions=None, tmpl_preview=False, disp_H=None):
         if bgr.ndim == 2:
             bgr = cv2.cvtColor(bgr, cv2.COLOR_GRAY2BGR)
         elif bgr.ndim == 3 and bgr.shape[2] == 4:
@@ -1195,7 +1217,7 @@ class App(tk.Tk):
 
         if self.tmpl.loaded:
             ih, iw = bgr.shape[:2]
-            H    = self._track_H   # None이면 img_size 스케일 폴백
+            H = disp_H if disp_H is not None else self._track_H
             regs = self.tmpl.data.get("regions", [])
 
             if H is None:
