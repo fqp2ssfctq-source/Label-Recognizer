@@ -98,33 +98,35 @@ class LabelAnalyzer:
 
     @staticmethod
     def preprocess_crop(bgr):
-        """OCR 전처리: 높이 최소 80px 보장 → OTSU 이진화 → 여백 추가."""
+        """OCR 전처리: 높이 최소 160px 보장 → 언샤프 마스크 → OTSU 이진화 → 여백 추가."""
         h, w = bgr.shape[:2]
-        # 높이 기준 업스케일 (문자가 너무 작으면 OCR 실패)
-        if h < 80:
-            scale = 80 / h
+        # 높이 기준 업스케일 — 작은 글씨는 충분히 크게 키워야 OCR 정확도 향상
+        if h < 160:
+            scale = 160 / h
             bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)),
                              interpolation=cv2.INTER_CUBIC)
             h, w = bgr.shape[:2]
         # 너비가 작으면 추가 확대
-        if w < 300:
-            scale = 300 / w
+        if w < 400:
+            scale = 400 / w
             bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)),
                              interpolation=cv2.INTER_CUBIC)
             h, w = bgr.shape[:2]
         # 너무 크면 축소
-        if w > 1400:
-            bgr = cv2.resize(bgr, (1400, int(h * 1400 / w)),
+        if w > 1600:
+            bgr = cv2.resize(bgr, (1600, int(h * 1600 / w)),
                              interpolation=cv2.INTER_AREA)
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+        # 언샤프 마스크 — 미세 텍스트 경계 선명화
+        blur = cv2.GaussianBlur(gray, (0, 0), 2.0)
+        gray = cv2.addWeighted(gray, 1.5, blur, -0.5, 0)
         # OTSU: 인쇄된 밝은 배경 + 어두운 문자에 최적
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         # 배경이 어두우면 반전 (흰 바탕 보장)
         if np.mean(binary) < 128:
             binary = cv2.bitwise_not(binary)
         # Tesseract가 가장자리 문자를 잘 인식하도록 흰 여백 추가
-        return cv2.copyMakeBorder(binary, 12, 12, 12, 12,
+        return cv2.copyMakeBorder(binary, 16, 16, 16, 16,
                                   cv2.BORDER_CONSTANT, value=255)
 
     @staticmethod
@@ -276,18 +278,30 @@ class LabelAnalyzer:
         def _scaled_grays(gray):
             h, w = gray.shape[:2]
             outs = []
+            # 이진화 먼저 → INTER_NEAREST 업스케일: 바 경계가 선명하게 유지됨
+            _, bin_img = cv2.threshold(gray, 0, 255,
+                                       cv2.THRESH_BINARY | cv2.THRESH_OTSU)
             if w < 800:
                 f = 3 if w < 300 else 2
                 outs.append(cv2.resize(gray, (w * f, h * f),
                                        interpolation=cv2.INTER_CUBIC))
+                outs.append(cv2.resize(bin_img, (w * f, h * f),
+                                       interpolation=cv2.INTER_NEAREST))
             outs.append(gray)
-            if h < 60:                                     # 얇은 1D 바코드
-                vf = max(2, 60 // max(1, h))
+            outs.append(bin_img)
+            if h < 120:                                    # 얇은 1D 바코드
+                vf = max(3, 120 // max(1, h))              # 목표 120px
                 outs.append(cv2.resize(gray, (w, h * vf),
+                                       interpolation=cv2.INTER_NEAREST))
+                outs.append(cv2.resize(bin_img, (w, h * vf),
                                        interpolation=cv2.INTER_NEAREST))
                 if w < 800:
                     outs.append(cv2.resize(gray, (w * 2, h * vf),
                                            interpolation=cv2.INTER_CUBIC))
+                    outs.append(cv2.resize(bin_img, (w * 2, h * vf),
+                                           interpolation=cv2.INTER_NEAREST))
+                    outs.append(cv2.resize(bin_img, (w * 3, h * vf),
+                                           interpolation=cv2.INTER_NEAREST))
             return outs
 
         # ── cv2.barcode용 스케일 (입력 크기와 무관한 목표 너비) ──
@@ -380,6 +394,15 @@ class TemplateManager:
     @property
     def name(self):
         return self.data["template_name"] if self.loaded else "템플릿 없음"
+
+    def _reg_expected(self, label):
+        """label에 해당하는 region의 expected text를 반환. 없으면 ""."""
+        if not self.loaded:
+            return ""
+        for reg in self.data.get("regions", []):
+            if reg.get("label") == label:
+                return reg.get("text", "").strip()
+        return ""
 
     @property
     def has_tracking(self):
@@ -631,7 +654,20 @@ class TemplateManager:
         # OCR 기반 구역 (pn / sn / desc / ocr / cust_*)
         text = LabelAnalyzer.ocr_crop(crop, typ=typ)
         if expected:
-            ok     = expected.lower() in text.lower()
+            ok = expected.lower() in text.lower()
+            if not ok and text.strip():
+                # 퍼지 매칭: 슬라이딩 윈도우로 expected 길이만큼 잘라 유사도 비교
+                # 타입별 임계값: 소형 고정 텍스트(class1/desc)는 낮게, 제품코드(pn/sn)는 높게
+                from difflib import SequenceMatcher
+                _FUZZY_THR = {"class1": 0.63, "desc": 0.67}
+                thr = _FUZZY_THR.get(typ, 0.82)
+                e_low, t_low = expected.lower(), text.lower()
+                el = len(e_low)
+                best = max(
+                    (SequenceMatcher(None, e_low, t_low[i:i + el]).ratio()
+                     for i in range(max(1, len(t_low) - el + 1))),
+                    default=0.0)
+                ok = best >= thr
             reason = "" if ok else f'"{expected}" 미발견'
         else:
             ok     = bool(text.strip())
@@ -679,6 +715,7 @@ class App(tk.Tk):
         self._track_H        = None   # 현재 호모그래피 (None=추적 없음)
         self._track_ok       = False  # 추적 성공 여부
         self._tracking       = False  # 추적 스레드 실행 플래그
+        self._display_frozen = False  # True=검사 사진 고정, False=라이브 표시
 
         _dir = os.path.dirname(os.path.abspath(__file__))
         self._app_dir     = _dir   # GUI 위치 폴더 (템플릿 기본 경로)
@@ -716,12 +753,26 @@ class App(tk.Tk):
         left = tk.Frame(self, bg=CLR["bg"])
         left.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
         left.rowconfigure(0, weight=1)
-        left.columnconfigure(0, weight=1)
+        left.columnconfigure(0, weight=0)  # 영역 결과 스트립 (고정 너비)
+        left.columnconfigure(1, weight=1)  # 카메라 캔버스 (확장)
+
+        # 영역 결과 스트립 — 캔버스 왼쪽에 세로 나열
+        _strip = tk.Frame(left, bg=CLR["panel"], width=158)
+        _strip.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        _strip.grid_propagate(False)
+        tk.Label(_strip, text="영역 결과", font=FONT_SMALL,
+                 fg=CLR["accent"], bg=CLR["panel"]).pack(anchor="w", padx=6, pady=(6, 2))
+        tk.Frame(_strip, bg=CLR["border"], height=1).pack(fill="x", padx=4)
+        self._info_rows = tk.Frame(_strip, bg=CLR["panel"])
+        self._info_rows.pack(fill="both", expand=True, padx=2, pady=2)
+        self._lbl_info_empty = tk.Label(self._info_rows, text="— 검사 전 —",
+                                        font=FONT_SMALL, fg=CLR["subtext"], bg=CLR["panel"])
+        self._lbl_info_empty.pack(pady=20)
 
         self._canvas = tk.Canvas(left, width=self.PREVIEW_W, height=self.PREVIEW_H,
                                  bg="#0d1117", highlightthickness=1,
                                  highlightbackground=CLR["border"])
-        self._canvas.grid(row=0, column=0, sticky="nsew")
+        self._canvas.grid(row=0, column=1, sticky="nsew")
         self._canvas.create_text(self.PREVIEW_W // 2, self.PREVIEW_H // 2,
                                  text="[ 카메라 시작 또는 파일 열기 ]",
                                  fill=CLR["subtext"], font=FONT_BODY, tags="hint")
@@ -733,7 +784,7 @@ class App(tk.Tk):
 
         # ctrl1: 카메라 제어
         ctrl1 = tk.Frame(left, bg=CLR["bg"])
-        ctrl1.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        ctrl1.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         self._btn_cam  = self._btn(ctrl1, "📷  카메라 선택", self._show_cam_dialog)
         self._btn_stop = self._btn(ctrl1, "⏹  중지",        self._stop_camera)
         self._btn_file = self._btn(ctrl1, "📂  파일 열기",   self._open_file)
@@ -748,6 +799,16 @@ class App(tk.Tk):
         self._auto_spin.delete(0, "end")
         self._auto_spin.insert(0, "5")
         self._btn_auto = self._btn(ctrl1, "⟳  자동", self._toggle_auto_inspect)
+
+        # 회전 — ctrl1 우측 고정 (right-pack 먼저)
+        self._lbl_rotate = tk.Label(ctrl1, text="0°", font=FONT_SMALL,
+                                    fg=CLR["subtext"], bg=CLR["bg"], width=4)
+        self._lbl_rotate.pack(side="right", padx=(0, 6), pady=2)
+        self._btn(ctrl1, "↺", self._rotate_ccw).pack(side="right", padx=2, pady=2)
+        self._btn(ctrl1, "↻", self._rotate_cw).pack(side="right", padx=2, pady=2)
+        tk.Frame(ctrl1, bg=CLR["border"], width=1).pack(side="right", fill="y", padx=6, pady=4)
+
+        # 카메라/검사 버튼 — 좌측
         self._btn_cam.pack(side="left", padx=4, pady=4)
         self._btn_stop.pack(side="left", padx=(0, 8), pady=4)
         self._btn_file.pack(side="left", padx=4, pady=4)
@@ -761,7 +822,7 @@ class App(tk.Tk):
 
         # ctrl2: 포맷 / 템플릿 / 회전 / 줌
         ctrl2 = tk.Frame(left, bg=CLR["bg"])
-        ctrl2.grid(row=2, column=0, sticky="ew", pady=(0, 4))
+        ctrl2.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 4))
 
         tk.Label(ctrl2, text="포맷:", font=FONT_SMALL,
                  fg=CLR["subtext"], bg=CLR["bg"]).pack(side="left", padx=(4, 2))
@@ -777,8 +838,18 @@ class App(tk.Tk):
         _res_cb.pack(side="left", padx=(0, 2))
         _res_cb.bind("<<ComboboxSelected>>", lambda e: self._on_res_change())
 
-        tk.Frame(ctrl2, bg=CLR["border"], width=1).pack(side="left", fill="y", padx=6, pady=4)
+        # 줌 — ctrl2 우측 고정 (right-pack 먼저)
+        self._btn(ctrl2, "+", self._zoom_in).pack(side="right", padx=(1, 4), pady=2)
+        self._lbl_zoom = tk.Label(ctrl2, text="1.0×", font=FONT_SMALL,
+                                  fg=CLR["text"], bg=CLR["btn"],
+                                  width=5, cursor="hand2", relief="flat", padx=4, pady=5)
+        self._lbl_zoom.pack(side="right", padx=1, pady=2)
+        self._lbl_zoom.bind("<Button-1>", lambda e: self._zoom_reset())
+        self._btn(ctrl2, "−", self._zoom_out).pack(side="right", padx=(1, 1), pady=2)
+        tk.Frame(ctrl2, bg=CLR["border"], width=1).pack(side="right", fill="y", padx=6, pady=4)
 
+        # 템플릿 — 좌측
+        tk.Frame(ctrl2, bg=CLR["border"], width=1).pack(side="left", fill="y", padx=6, pady=4)
         self._btn_tmpl     = self._btn(ctrl2, "📋 템플릿",   self._load_template)
         self._btn_new      = self._btn(ctrl2, "✨ 새 템플릿", self._template_wizard)
         self._btn_edit     = self._btn(ctrl2, "✏ 편집",     self._edit_template)
@@ -788,24 +859,6 @@ class App(tk.Tk):
         self._btn_new.pack(side="left",      padx=3, pady=2)
         self._btn_edit.pack(side="left",     padx=3, pady=2)
         self._btn_tmpl_del.pack(side="left", padx=3, pady=2)
-
-        tk.Frame(ctrl2, bg=CLR["border"], width=1).pack(side="left", fill="y", padx=6, pady=4)
-
-        self._btn(ctrl2, "↻ 90°", self._rotate_cw).pack(side="left", padx=3, pady=2)
-        self._btn(ctrl2, "↺ 90°", self._rotate_ccw).pack(side="left", padx=3, pady=2)
-        self._lbl_rotate = tk.Label(ctrl2, text="0°", font=FONT_SMALL,
-                                    fg=CLR["subtext"], bg=CLR["bg"], width=4)
-        self._lbl_rotate.pack(side="left", padx=(0, 3), pady=2)
-
-        tk.Frame(ctrl2, bg=CLR["border"], width=1).pack(side="left", fill="y", padx=6, pady=4)
-
-        self._btn(ctrl2, "−", self._zoom_out).pack(side="left", padx=(3, 1), pady=2)
-        self._lbl_zoom = tk.Label(ctrl2, text="1.0×", font=FONT_SMALL,
-                                  fg=CLR["text"], bg=CLR["btn"],
-                                  width=5, cursor="hand2", relief="flat", padx=4, pady=5)
-        self._lbl_zoom.pack(side="left", padx=1, pady=2)
-        self._lbl_zoom.bind("<Button-1>", lambda e: self._zoom_reset())
-        self._btn(ctrl2, "+", self._zoom_in).pack(side="left", padx=(1, 3), pady=2)
 
         # 우측 패널
         right = tk.Frame(self, bg=CLR["panel"], relief="flat")
@@ -974,7 +1027,7 @@ class App(tk.Tk):
         wait  = "  (~10초 소요)" if backend == cv2.CAP_MSMF else ""
         self._status(f"CAM {idx} [{bname}] 연결 중...{wait}")
         threading.Thread(target=self._open_camera_bg,
-                         args=(idx, res, backend), daemon=True).start()
+                         args=(idx, res, backend, fmt), daemon=True).start()
 
     @staticmethod
     def _get_dshow_devices():
@@ -984,7 +1037,7 @@ class App(tk.Tk):
         except Exception:
             return []
 
-    def _open_camera_bg(self, idx, res=(640, 480), backend=cv2.CAP_DSHOW):
+    def _open_camera_bg(self, idx, res=(640, 480), backend=cv2.CAP_DSHOW, fmt="AUTO"):
         w, h   = res
         result = [None]
 
@@ -992,6 +1045,8 @@ class App(tk.Tk):
             try:
                 c = cv2.VideoCapture(idx, backend)
                 if c.isOpened():
+                    if fmt and fmt.upper() not in ("AUTO", ""):
+                        c.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fmt.upper()))
                     c.set(cv2.CAP_PROP_FRAME_WIDTH,  w)
                     c.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
                     result[0] = c
@@ -1112,14 +1167,15 @@ class App(tk.Tk):
             frame = self._apply_transform(frame)
             self.current_bgr   = frame
             self._latest_frame = None
-            try:
-                h, w = frame.shape[:2]
-                self._show_frame(frame, tmpl_preview=self.tmpl.loaded)
-                fc = getattr(self, "_frame_count", 0)
-                zoom_str = f"  줌:{self._zoom:.1f}×" if self._zoom > 1.0 else ""
-                self._status(f"스트리밍 중... {w}×{h}  밝기:{int(frame.mean())}  프레임:{fc}{zoom_str}")
-            except Exception as e:
-                self._status(f"표시 오류: {e}")
+            if not self._display_frozen:
+                try:
+                    h, w = frame.shape[:2]
+                    self._show_frame(frame, tmpl_preview=self.tmpl.loaded)
+                    fc = getattr(self, "_frame_count", 0)
+                    zoom_str = f"  줌:{self._zoom:.1f}×" if self._zoom > 1.0 else ""
+                    self._status(f"스트리밍 중... {w}×{h}  밝기:{int(frame.mean())}  프레임:{fc}{zoom_str}")
+                except Exception as e:
+                    self._status(f"표시 오류: {e}")
         self._after_id = self.after(50, self._cam_display)
 
     # ── 파일 열기 ────────────────────────────────
@@ -1201,12 +1257,14 @@ class App(tk.Tk):
         # 캔버스 크기로 early downscale — 이후 모든 연산을 작은 이미지에서 수행
         cw = self._canvas.winfo_width()
         ch = self._canvas.winfo_height()
+        _ds = 1.0  # 오버레이 좌표 변환에 사용할 다운스케일 비율
         if cw > 1 and ch > 1:
             fh0, fw0 = bgr.shape[:2]
             ds = min(cw / fw0, ch / fh0)
             if ds < 0.95:
                 bgr = cv2.resize(bgr, (int(fw0 * ds), int(fh0 * ds)),
                                  interpolation=cv2.INTER_AREA)
+                _ds = ds
 
         rgb = cv2.cvtColor(bgr.copy(), cv2.COLOR_BGR2RGB)
 
@@ -1237,24 +1295,27 @@ class App(tk.Tk):
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
             def _get_pts(reg):
-                """H가 있으면 기울어진 4점, 없으면 축정렬 rect 반환."""
+                """H가 있으면 기울어진 4점(다운스케일 적용), 없으면 축정렬 rect 반환."""
                 if H is not None:
-                    return TemplateManager.transform_corners(H, reg["rect"])
+                    # H는 원본 해상도(1280×720) 좌표계 → canvas 좌표계로 변환
+                    pts = TemplateManager.transform_corners(H, reg["rect"])
+                    return (pts * _ds).astype(np.float32)
                 r = reg["rect"]
                 return [int(r[0]*sx), int(r[1]*sy), int(r[2]*sx), int(r[3]*sy)]
 
             if result_regions:
-                # 검사 결과: OK=녹색 / NG=빨간색
+                # 검사 결과: OK=녹색 / NG=빨간색 (박스만, 텍스트는 왼쪽 스트립에 표시)
                 for i, res in enumerate(result_regions):
                     if i >= len(regs):
                         break
                     color = (0, 230, 100) if res["ok"] else (255, 61, 61)
-                    _draw_region(_get_pts(regs[i]), color, 2, res["label"])
+                    _draw_region(_get_pts(regs[i]), color, 1, "")
+                self.after(0, lambda r=result_regions: self._update_info_strip(r))
             elif tmpl_preview:
-                # 템플릿 미리보기: 유형별 색상 윤곽 + 라벨
+                # 템플릿 미리보기: 유형별 색상 윤곽만 (라벨은 왼쪽 스트립에 표시)
                 for reg in regs:
                     color = _hex_to_rgb(REGION_COL.get(reg["type"], "#80c8ff"))
-                    _draw_region(_get_pts(reg), color, 1, reg.get("label", reg["type"]))
+                    _draw_region(_get_pts(reg), color, 1, "")
 
             # 추적 상태 표시기 (우하단)
             if self.tmpl.has_tracking:
@@ -1297,15 +1358,64 @@ class App(tk.Tk):
             messagebox.showwarning("경고", "템플릿을 먼저 불러오거나 생성해주세요.")
             return
 
-        self._btn_snap.configure(state="disabled", text="분석 중...")
-        self._status("검사 진행 중...")
-        frame = self.current_bgr.copy()
-
-        H = self._track_H  # 스냅샷 (스레드 안전)
+        self._display_frozen = False   # 라이브로 복귀 후 수집 시작
+        self._btn_snap.configure(state="disabled", text="프레임 수집 중...")
+        self._status("최적 프레임 수집 중...")
 
         def worker():
+            import time as _t
             try:
+                def _sharpness(bgr):
+                    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+                    return cv2.Laplacian(gray, cv2.CV_64F).var()
+
+                def _diff(a, b):
+                    """두 프레임 간 평균 픽셀 차이 — 움직임 측정."""
+                    ga = cv2.cvtColor(a, cv2.COLOR_BGR2GRAY).astype(np.float32)
+                    gb = cv2.cvtColor(b, cv2.COLOR_BGR2GRAY).astype(np.float32)
+                    return float(np.mean(np.abs(ga - gb)))
+
+                # ── 1단계: 안정화 대기 (최대 3초) ──────────────
+                # 연속 5프레임이 픽셀 평균 변화 2 미만이면 안정으로 판단
+                prev = self.current_bgr.copy()
+                stable = 0
+                timeout = _t.time() + 3.0
+                while _t.time() < timeout:
+                    _t.sleep(0.05)
+                    curr = self.current_bgr
+                    if curr is None:
+                        continue
+                    if _diff(prev, curr) < 2.0:
+                        stable += 1
+                        if stable >= 5:
+                            break
+                    else:
+                        stable = 0
+                    prev = curr.copy()
+
+                self.after(0, lambda: self._btn_snap.configure(text="캡처 중..."))
+
+                # ── 2단계: 안정된 프레임 평균화 → 노이즈 제거 + 선명화 ──
+                frames_f = []
+                deadline = _t.time() + 0.5
+                while _t.time() < deadline:
+                    _t.sleep(0.04)
+                    f = self.current_bgr
+                    if f is not None:
+                        frames_f.append(f.astype(np.float32))
+                if frames_f:
+                    avg = np.mean(frames_f, axis=0).astype(np.uint8)
+                else:
+                    avg = self.current_bgr.copy()
+                # 언샤프 마스크로 선명화
+                blur = cv2.GaussianBlur(avg, (0, 0), 1.5)
+                best = cv2.addWeighted(avg, 1.8, blur, -0.8, 0)
+
+                self.after(0, lambda: self._btn_snap.configure(text="분석 중..."))
+                frame = best
+                H = self._track_H
                 region_results = self.tmpl.inspect(frame, H=H)
+                self.after(0, lambda: setattr(self, "_display_frozen", True))
                 self.after(0, lambda: self._on_result(region_results, frame))
             except Exception:
                 import traceback
@@ -1327,6 +1437,29 @@ class App(tk.Tk):
     def _on_result(self, region_results, frame):
         try:
             self._btn_snap.configure(state="normal", text="🔍  검사 실행")
+
+            # S/N ↔ 바코드 교차 검증: expected가 비어있는 sn과 barcode는 서로 비교
+            sn_items  = [r for r in region_results if r["type"] == "sn"
+                         and not self.tmpl._reg_expected(r["label"])]
+            bar_items = [r for r in region_results if r["type"] == "barcode"
+                         and not self.tmpl._reg_expected(r["label"])]
+            if sn_items and bar_items:
+                sn_val  = sn_items[0]["value"].strip()
+                bar_val = bar_items[0]["value"].strip()
+                if sn_val and bar_val:
+                    from difflib import SequenceMatcher
+                    # OCR 오인식(T↔7, O↔0 등) 허용: 90% 이상 유사도면 일치로 판정
+                    match = (sn_val == bar_val or
+                             SequenceMatcher(None, sn_val, bar_val).ratio() >= 0.90)
+                    for r in sn_items:
+                        r["label"] = r.get("label", "S/N") + " (텍스트)"
+                        r["ok"]    = match
+                        r["reason"] = "" if match else f"바코드값과 불일치 ({bar_val})"
+                    for r in bar_items:
+                        r["label"] = r.get("label", "S/N") + " (바코드)"
+                        r["ok"]    = match
+                        r["reason"] = "" if match else f"텍스트와 불일치 ({sn_val})"
+
             verdict = "OK" if region_results and all(r["ok"] for r in region_results) else "NG"
             entry = {
                 "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -1347,6 +1480,56 @@ class App(tk.Tk):
         except Exception:
             import traceback
             self._on_error(traceback.format_exc())
+
+    # ── 영역 결과 스트립 ─────────────────────────
+    def _update_info_strip(self, result_regions=None):
+        """카메라 왼쪽 스트립에 영역별 결과를 세로 목록으로 표시."""
+        for w in self._info_rows.winfo_children():
+            w.destroy()
+        if not result_regions:
+            tk.Label(self._info_rows, text="— 검사 전 —",
+                     font=FONT_SMALL, fg=CLR["subtext"], bg=CLR["panel"]).pack(pady=20)
+            return
+        for res in result_regions:
+            ok    = res.get("ok", False)
+            label = res.get("label", "")
+            value = res.get("value", "")
+            icon  = "✓" if ok else "✗"
+            ic    = CLR["ok"] if ok else CLR["ng"]
+            # 라벨 행
+            row = tk.Frame(self._info_rows, bg=CLR["panel"])
+            row.pack(fill="x", padx=2, pady=(3, 0))
+            tk.Label(row, text=icon, font=("Consolas", 9, "bold"),
+                     fg=ic, bg=CLR["panel"], width=2).pack(side="left")
+            tk.Label(row, text=label, font=FONT_SMALL,
+                     fg=CLR["text"], bg=CLR["panel"], anchor="w").pack(side="left")
+            # 값 행
+            if value:
+                disp = value if len(value) <= 17 else value[:16] + "…"
+                val_row = tk.Frame(self._info_rows, bg=CLR["panel"])
+                val_row.pack(fill="x", padx=(20, 2), pady=(0, 1))
+                tk.Label(val_row, text=disp, font=FONT_SMALL,
+                         fg=CLR["subtext"] if ok else CLR["ng"],
+                         bg=CLR["panel"], anchor="w").pack(side="left")
+            # 구분선
+            tk.Frame(self._info_rows, bg=CLR["border"], height=1).pack(
+                fill="x", padx=4, pady=(2, 0))
+
+    def _update_info_strip_preview(self, regs):
+        """템플릿 미리보기 중 영역 이름만 스트립에 표시 (검사 결과 없음)."""
+        for w in self._info_rows.winfo_children():
+            w.destroy()
+        for reg in regs:
+            label = reg.get("label", reg.get("type", ""))
+            row = tk.Frame(self._info_rows, bg=CLR["panel"])
+            row.pack(fill="x", padx=2, pady=(3, 0))
+            col = REGION_COL.get(reg["type"], "#80c8ff")
+            tk.Label(row, text="●", font=("Consolas", 8),
+                     fg=col, bg=CLR["panel"], width=2).pack(side="left")
+            tk.Label(row, text=label, font=FONT_SMALL,
+                     fg=CLR["subtext"], bg=CLR["panel"], anchor="w").pack(side="left")
+            tk.Frame(self._info_rows, bg=CLR["border"], height=1).pack(
+                fill="x", padx=4, pady=(2, 0))
 
     # ── 결과 렌더링 ──────────────────────────────
     def _render_result(self, entry):
@@ -2060,7 +2243,8 @@ class App(tk.Tk):
         path = filedialog.askopenfilename(
             title="템플릿 파일 선택",
             initialdir=self._app_dir,
-            filetypes=[("JSON 템플릿", "*.json"), ("모든 파일", "*.*")]
+            filetypes=[("JSON 템플릿", "*.json"), ("모든 파일", "*.*")],
+            parent=self
         )
         if not path:
             return
@@ -2100,6 +2284,7 @@ class App(tk.Tk):
         self._stop_tracking()
         if self.cam_running:
             self._start_tracking()
+        self._update_info_strip_preview(regs)   # 스트립에 영역 이름 1회만 표시
         if self.current_bgr is not None:
             self._show_frame(self.current_bgr, tmpl_preview=True)
         else:
@@ -2124,6 +2309,7 @@ class App(tk.Tk):
         self.tmpl._orb_kp  = None
         self.tmpl._orb_des = None
         self._lbl_tmpl.configure(text="[ 템플릿 없음 ]", fg=CLR["warn"])
+        self._update_info_strip()
         if self.current_bgr is not None:
             self._show_frame(self.current_bgr)
         self._status("템플릿 해제됨")
@@ -2316,7 +2502,7 @@ class App(tk.Tk):
     def _auto_inspect_loop(self):
         if not self._auto_inspect:
             return
-        if self.cam_running and self.current_bgr is not None:
+        if self.cam_running and self.current_bgr is not None and self.tmpl.loaded:
             if str(self._btn_snap.cget("state")) == "normal":
                 self._inspect()
         self._auto_after_id = self.after(
