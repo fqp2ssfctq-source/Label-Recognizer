@@ -1,0 +1,76 @@
+{
+  "template_name": "NEW_TEMPLATE",
+  "img_size": [
+    1280,
+    720
+  ],
+  "regions": [
+    {
+      "label": "제품 설명",
+      "type": "desc",
+      "rect": [
+        686,
+        256,
+        245,
+        22
+      ],
+      "text": "Tx 1309.14nm 25.78Gb/s 25km"
+    },
+    {
+      "label": "P/N",
+      "type": "pn",
+      "rect": [
+        689,
+        277,
+        227,
+        24
+      ],
+      "text": "SFP2X-SO2LW-IFB"
+    },
+    {
+      "label": "S/N",
+      "type": "sn",
+      "rect": [
+        803,
+        364,
+        114,
+        26
+      ],
+      "text": ""
+    },
+    {
+      "label": "바코드",
+      "type": "barcode",
+      "rect": [
+        686,
+        389,
+        232,
+        28
+      ],
+      "text": ""
+    },
+    {
+      "label": "Class 1 Laser",
+      "type": "class1",
+      "rect": [
+        567,
+        372,
+        155,
+        21
+      ],
+      "text": "Class 1 Laser Product"
+    },
+    {
+      "label": "Certi. Mark",
+      "type": "certi",
+      "rect": [
+        568,
+        390,
+        109,
+        27
+      ],
+      "text": ""
+    }
+  ],
+  "ref_image": "SFP2X-SO2LW-IFB_ref.jpg"
+}

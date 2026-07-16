@@ -1,0 +1,87 @@
+{
+  "template_name": "NEW_TEMPLATE",
+  "img_size": [
+    1280,
+    720
+  ],
+  "regions": [
+    {
+      "label": "회사 CI",
+      "type": "ci",
+      "rect": [
+        643,
+        302,
+        114,
+        41
+      ],
+      "text": ""
+    },
+    {
+      "label": "Certi. Mark",
+      "type": "certi",
+      "rect": [
+        650,
+        432,
+        104,
+        26
+      ],
+      "text": ""
+    },
+    {
+      "label": "Class 1 Laser",
+      "type": "class1",
+      "rect": [
+        648,
+        409,
+        165,
+        23
+      ],
+      "text": "Class 1 Laser Product"
+    },
+    {
+      "label": "제품 설명",
+      "type": "desc",
+      "rect": [
+        757,
+        295,
+        165,
+        24
+      ],
+      "text": "Tx 1310nm 25Gb/s 2km"
+    },
+    {
+      "label": "P/N",
+      "type": "pn",
+      "rect": [
+        758,
+        316,
+        155,
+        21
+      ],
+      "text": "SFP2X-IS3LC-IAA"
+    },
+    {
+      "label": "S/N",
+      "type": "sn",
+      "rect": [
+        886,
+        414,
+        101,
+        16
+      ],
+      "text": ""
+    },
+    {
+      "label": "바코드",
+      "type": "barcode",
+      "rect": [
+        764,
+        428,
+        224,
+        25
+      ],
+      "text": ""
+    }
+  ],
+  "ref_image": "260715_ref.jpg"
+}

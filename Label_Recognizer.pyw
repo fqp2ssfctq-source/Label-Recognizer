@@ -18,6 +18,7 @@ import datetime
 import json
 import os
 import csv
+import subprocess
 
 try:
     import openpyxl
@@ -47,6 +48,64 @@ try:
     TESSEROCR_OK = True
 except ImportError:
     TESSEROCR_OK = False
+
+
+def _winrt_ocr_text(bgr):
+    """Windows.Media.Ocr로 텍스트 인식 (Tesseract보다 정확한 경우가 많음).
+    실패/미지원 시 None. 반드시 background 스레드에서 호출할 것 (RoInitialize MTA 필요).
+    실측 결과: 텍스트 한 줄만 딱 잘라 주면 인식 실패하는 경우가 있고, 바코드 등
+    주변 콘텐츠가 어느 정도 함께 있어야 안정적으로 인식됨 — 호출 측에서 여유
+    있는 크롭을 넘겨줘야 한다."""
+    import asyncio, ctypes
+    try:
+        _ro = ctypes.windll.LoadLibrary("api-ms-win-core-winrt-l1-1-0.dll")
+        _ro.RoInitialize(1)   # RO_INIT_MULTITHREADED
+    except Exception:
+        return None
+
+    try:
+        import winrt.windows.media.ocr as _wocr
+        import winrt.windows.storage.streams as _wss
+        import winrt.windows.graphics.imaging as _wgi
+    except ImportError:
+        return None
+
+    async def _run():
+        ok, buf = cv2.imencode(".png", bgr)
+        if not ok:
+            return None
+        data = buf.tobytes()
+        stream = _wss.InMemoryRandomAccessStream()
+        writer = _wss.DataWriter(stream.get_output_stream_at(0))
+        writer.write_bytes(data)
+        await writer.store_async()
+        await writer.flush_async()
+        stream.seek(0)
+        decoder = await _wgi.BitmapDecoder.create_async(stream)
+        bitmap = await decoder.get_software_bitmap_async()
+        engine = _wocr.OcrEngine.try_create_from_user_profile_languages()
+        if engine is None:
+            return None
+        result = await engine.recognize_async(bitmap)
+        lines = [ln.text for ln in result.lines]
+        if not lines:
+            return result.text
+        if len(lines) == 1:
+            return lines[0]
+        # 바코드 막대가 별도의 "줄"로 잘못 인식되어 실제 텍스트 줄에 이어붙는
+        # 경우가 있다(실측 확인) — 영숫자(A-Z0-9) 개수가 가장 많은 한 줄만 채택.
+        import re as _re
+        best = max(lines, key=lambda s: len(_re.findall(r"[A-Za-z0-9]", s)))
+        return best
+
+    try:
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(_run())
+        finally:
+            loop.close()
+    except Exception:
+        return None
 
 # ──────────────────────────────────────────────
 CLR = {
@@ -141,8 +200,15 @@ class LabelAnalyzer:
         return text
 
     @staticmethod
-    def ocr_crop(bgr, typ="ocr"):
-        """crop 이미지에서 OCR 텍스트 추출. typ에 따라 PSM·문자셋 최적화."""
+    def ocr_crop(bgr, typ="ocr", wide_crop=None):
+        """crop 이미지에서 OCR 텍스트 추출. typ에 따라 PSM·문자셋 최적화.
+        wide_crop이 주어지면 Windows 내장 OCR을 먼저 시도(실측상 Tesseract보다
+        이 폰트에 더 정확함) — 실패 시 기존 Tesseract 파이프라인으로 폴백."""
+        if wide_crop is not None:
+            win_text = _winrt_ocr_text(wide_crop)
+            if win_text and win_text.strip():
+                return LabelAnalyzer._postprocess_ocr(win_text, typ)
+
         proc = LabelAnalyzer.preprocess_crop(bgr)
 
         # 유형별 PSM: 단일 코드(P/N, S/N)는 PSM 7(한 줄), 나머지는 PSM 6(블록)
@@ -528,7 +594,33 @@ class TemplateManager:
                                    "value": "", "reason": "구역 범위 오류"}
                     return
                 crop = bgr[y0:y1, x0:x1]
-            results[i] = self._check(crop, reg)
+
+            # S/N: Windows 내장 OCR은 텍스트 한 줄만 딱 잘라주면 인식 실패하는
+            # 경우가 있고, 바로 아래 바코드까지 포함된 여유 크롭을 줘야 안정적으로
+            # 인식된다(실측 확인) — sn 타입에 한해 아래로 3배 확장한 크롭을 추가 전달.
+            wide_crop = None
+            if reg["type"] == "sn":
+                rx, ry, rw, rh = reg["rect"]
+                wide_rect = [rx, ry, rw, rh * 3]
+                if H is not None:
+                    wpts = self.transform_corners(H, wide_rect).astype(np.float32)
+                    ww = int(max(np.linalg.norm(wpts[1] - wpts[0]),
+                                np.linalg.norm(wpts[2] - wpts[3])))
+                    wh = int(max(np.linalg.norm(wpts[3] - wpts[0]),
+                                np.linalg.norm(wpts[2] - wpts[1])))
+                    ww = max(1, ww); wh = max(1, wh)
+                    wdst = np.float32([[0, 0], [ww, 0], [ww, wh], [0, wh]])
+                    wM = cv2.getPerspectiveTransform(wpts, wdst)
+                    wide_crop = cv2.warpPerspective(bgr, wM, (ww, wh))
+                else:
+                    wx0, wy0 = int(rx*sx), int(ry*sy)
+                    wx1, wy1 = int((rx+rw)*sx), int((ry+rh*3)*sy)
+                    wx0 = max(0, wx0); wy0 = max(0, wy0)
+                    wx1 = min(iw, wx1); wy1 = min(ih, wy1)
+                    if wx1 > wx0 and wy1 > wy0:
+                        wide_crop = bgr[wy0:wy1, wx0:wx1]
+
+            results[i] = self._check(crop, reg, wide_crop=wide_crop)
 
         threads = [_th.Thread(target=_run, args=(i, reg), daemon=True)
                    for i, reg in enumerate(regions)]
@@ -631,7 +723,7 @@ class TemplateManager:
                 "value": f"유사도 {sim:.2f}",
                 "reason": "" if ok else f"기준 이미지와 불일치 ({sim:.2f} < {thr:.2f})"}
 
-    def _check(self, crop, reg):
+    def _check(self, crop, reg, wide_crop=None):
         typ      = reg["type"]
         label    = reg.get("label") or typ
         expected = reg.get("text", "").strip()
@@ -652,7 +744,7 @@ class TemplateManager:
                     "value": value, "reason": reason}
 
         # OCR 기반 구역 (pn / sn / desc / ocr / cust_*)
-        text = LabelAnalyzer.ocr_crop(crop, typ=typ)
+        text = LabelAnalyzer.ocr_crop(crop, typ=typ, wide_crop=wide_crop)
         if expected:
             ok = expected.lower() in text.lower()
             if not ok and text.strip():
@@ -716,6 +808,10 @@ class App(tk.Tk):
         self._track_ok       = False  # 추적 성공 여부
         self._tracking       = False  # 추적 스레드 실행 플래그
         self._display_frozen = False  # True=검사 사진 고정, False=라이브 표시
+        self._camroll_watching = False
+        self._camroll_folder   = None
+        self._camroll_seen     = set()
+        self._camroll_after_id = None
 
         _dir = os.path.dirname(os.path.abspath(__file__))
         self._app_dir     = _dir   # GUI 위치 폴더 (템플릿 기본 경로)
@@ -799,6 +895,9 @@ class App(tk.Tk):
         self._auto_spin.delete(0, "end")
         self._auto_spin.insert(0, "5")
         self._btn_auto = self._btn(ctrl1, "⟳  자동", self._toggle_auto_inspect)
+        self._btn_camroll = self._btn(ctrl1, "📸  카메라롤 감시", self._toggle_camroll_watch)
+        self._btn_camshot = self._btn(ctrl1, "📷  촬영", self._trigger_camera_app_capture,
+                                      accent=True)
 
         # 회전 — ctrl1 우측 고정 (right-pack 먼저)
         self._lbl_rotate = tk.Label(ctrl1, text="0°", font=FONT_SMALL,
@@ -818,6 +917,9 @@ class App(tk.Tk):
         self._auto_spin.pack(side="left", padx=2, pady=4)
         tk.Label(ctrl1, text="초", font=FONT_SMALL,
                  fg=CLR["subtext"], bg=CLR["bg"]).pack(side="left")
+        tk.Frame(ctrl1, bg=CLR["border"], width=1).pack(side="left", fill="y", padx=8, pady=4)
+        self._btn_camroll.pack(side="left", padx=4, pady=4)
+        self._btn_camshot.pack(side="left", padx=4, pady=4)
         self._btn_stop.configure(state="disabled")
 
         # ctrl2: 포맷 / 템플릿 / 회전 / 줌
@@ -1195,17 +1297,252 @@ class App(tk.Tk):
         if ext in (".mp4", ".avi", ".mov", ".mkv"):
             self._open_video(path)
         else:
-            bgr = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
-            if bgr is None:
+            if not self._load_image_file(path):
                 messagebox.showerror("오류", "이미지를 읽을 수 없습니다.")
-                return
+
+    def _load_image_file(self, path):
+        """이미지 파일을 읽어 현재 프레임으로 표시. 성공 시 True.
+        파일이 다른 프로세스(카메라 앱)에 의해 아직 쓰기 잠금 상태일 수 있으므로
+        모든 예외를 실패로 처리해 호출측 재시도 로직이 동작하게 한다."""
+        try:
+            bgr = cv2.imdecode(np.fromfile(path, dtype=np.uint8), cv2.IMREAD_COLOR)
+        except Exception:
+            return False
+        if bgr is None:
+            return False
+        self._stop_camera()
+        self._stop_video()
+        self._static_bgr = bgr.copy()
+        bgr = self._apply_transform(bgr)
+        self.current_bgr = bgr
+        # 정적 이미지는 라이브 추적 스레드가 돌지 않아 self._track_H가 계속 None으로
+        # 남는다 — ORB 정합을 한 번 계산해 저장해두면 이후 모든 화면 갱신(확대/축소,
+        # 회전 등)이 자동으로 이 값을 사용해 정확히 정렬된 상태로 그려진다.
+        self._track_H = (self.tmpl.match_frame(bgr)
+                         if self.tmpl.loaded and self.tmpl.has_tracking else None)
+        self._show_frame(bgr)
+        self._status(f"이미지 로드: {os.path.basename(path)}")
+        return True
+
+    # ── 카메라롤 자동 감시 ─────────────────────────
+    _CAMROLL_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
+
+    def _camroll_find_folder(self):
+        home = os.path.expanduser("~")
+        candidates = [os.path.join(home, "Pictures", "Camera Roll")]
+        onedrive = os.environ.get("OneDrive") or os.environ.get("OneDriveConsumer")
+        if onedrive:
+            candidates.append(os.path.join(onedrive, "Pictures", "Camera Roll"))
+            candidates.append(os.path.join(onedrive, "사진", "카메라 앨범"))
+        for c in candidates:
+            if os.path.isdir(c):
+                return c
+        return None
+
+    def _camroll_list_images(self, folder):
+        try:
+            return {f for f in os.listdir(folder)
+                    if os.path.splitext(f)[1].lower() in self._CAMROLL_EXTS}
+        except Exception:
+            return set()
+
+    def _toggle_camroll_watch(self):
+        if self._camroll_watching:
+            self._camroll_watching = False
+            if self._camroll_after_id:
+                self.after_cancel(self._camroll_after_id)
+                self._camroll_after_id = None
+            self._btn_camroll.configure(text="📸  카메라롤 감시", bg=CLR["btn"])
+            self._status("카메라롤 감시 중지됨")
+            return
+
+        folder = self._camroll_find_folder()
+        if not folder:
+            messagebox.showerror(
+                "오류",
+                "카메라롤 폴더를 찾을 수 없습니다.\n"
+                r"(찾는 위치: Pictures\Camera Roll)"
+            )
+            return
+
+        # GUI가 IPEVO를 점유한 채로는 Windows 카메라 앱이 같은 장치를 열 수 없다
+        # (CameraReservedByAnotherApp) — 감시 시작 시 우리 쪽 스트리밍을 먼저 해제.
+        if self.cam_running:
             self._stop_camera()
-            self._stop_video()
-            self._static_bgr = bgr.copy()
-            bgr = self._apply_transform(bgr)
-            self.current_bgr = bgr
-            self._show_frame(bgr)
-            self._status(f"이미지 로드: {os.path.basename(path)}")
+
+        self._camroll_folder   = folder
+        self._camroll_seen     = self._camroll_list_images(folder)
+        self._camroll_watching = True
+        self._btn_camroll.configure(text="⏹  감시 중지", bg=CLR["btn_on"])
+        self._status(f"카메라롤 감시 시작: {folder}  |  카메라 앱 실행 중...")
+        self._camroll_poll()
+        self._open_windows_camera_app()
+        self.after(500, self._tile_windows_side_by_side)
+
+    def _open_windows_camera_app(self):
+        """Windows 카메라 앱을 URI 스킴으로 실행 (사진 모드)."""
+        try:
+            subprocess.run(
+                ["cmd", "/c", "start", "", "microsoft.windows.camera:"],
+                check=False, capture_output=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except Exception as e:
+            self._status(f"카메라 앱 실행 실패 — 수동으로 열어주세요 ({e})")
+
+    _CAM_APP_W = 480   # Windows 카메라 앱 창 크기 — 셔터 조작 가능한 선에서 최소화
+    _CAM_APP_H = 400
+
+    def _tile_windows_side_by_side(self):
+        """우리 GUI는 화면 대부분을 차지하고, Windows 카메라 앱은 우측 상단에
+        작게 배치 — GUI 버튼들이 다 보이도록 GUI 폭을 우선한다."""
+        import ctypes
+        u32 = ctypes.windll.user32
+        sw = u32.GetSystemMetrics(0)
+        sh = u32.GetSystemMetrics(1)
+        gui_w = max(1100, sw - self._CAM_APP_W - 16)
+        self.geometry(f"{gui_w}x{sh}+0+0")
+        self._tile_camera_app_retry(sw, sh)
+
+    def _tile_camera_app_retry(self, sw, sh, retries=15):
+        """카메라 앱 창은 비동기로 열리므로 뜰 때까지 재시도하며 우측 상단에 작게 배치."""
+        import ctypes
+        u32 = ctypes.windll.user32
+        hwnd = u32.FindWindowW(None, "카메라")
+        if not hwnd:
+            if retries > 0:
+                self.after(300, lambda: self._tile_camera_app_retry(sw, sh, retries - 1))
+            return
+        u32.ShowWindow(hwnd, 9)  # SW_RESTORE — 최소화 상태였다면 복원
+        x = sw - self._CAM_APP_W
+        u32.SetWindowPos(hwnd, 0, x, 0, self._CAM_APP_W, self._CAM_APP_H, 0x0044)
+
+    def _trigger_camera_app_capture(self):
+        """Windows 카메라 앱에 포커스를 준 뒤 스페이스바를 보내 원격으로 촬영을 트리거.
+        (실측 검증됨 — 카메라 앱 창에 포커스가 있으면 스페이스바가 셔터 역할을 함)"""
+        import ctypes
+        u32 = ctypes.windll.user32
+        hwnd = u32.FindWindowW(None, "카메라")
+        if not hwnd:
+            messagebox.showwarning(
+                "경고",
+                "Windows 카메라 앱을 찾을 수 없습니다.\n"
+                "먼저 '카메라롤 감시'를 시작해 카메라 앱을 열어주세요."
+            )
+            return
+
+        def worker():
+            import time as _t
+            VK_SPACE = 0x20
+            KEYEVENTF_KEYUP = 0x0002
+            u32.SetForegroundWindow(hwnd)
+            _t.sleep(0.15)
+            u32.keybd_event(VK_SPACE, 0, 0, 0)
+            _t.sleep(0.05)
+            u32.keybd_event(VK_SPACE, 0, KEYEVENTF_KEYUP, 0)
+            self.after(0, lambda: self._status("촬영 트리거 전송됨 — 처리 중..."))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _preview_aligned_label(self, frame):
+        """정렬(H) 계산 후 전체 라벨 영역만 크롭해 확대 표시 — 검사 실행 전
+        사람이 육안으로 정렬/초점 상태를 확인할 수 있게 한다."""
+        if not self.tmpl.loaded:
+            return None
+        regs = self.tmpl.data.get("regions", [])
+        if not regs:
+            return None
+
+        # _load_image_file()에서 이미 계산해 둔 값을 재사용 — 매번 다시 매칭하면
+        # RANSAC 무작위성 때문에 검사 결과와 미세하게 다른 H가 나올 수 있다.
+        H = self._track_H
+        if H is None and self.tmpl.has_tracking:
+            H = self.tmpl.match_frame(frame)
+        if H is not None:
+            pts_list = [TemplateManager.transform_corners(H, r["rect"]) for r in regs]
+        else:
+            ih, iw = frame.shape[:2]
+            tw, th = self.tmpl.data.get("img_size", [iw, ih])
+            sx = iw / tw if tw else 1.0
+            sy = ih / th if th else 1.0
+            pts_list = []
+            for r in regs:
+                rx, ry, rw, rh = r["rect"]
+                pts_list.append(np.array([
+                    [rx * sx,          ry * sy],
+                    [(rx + rw) * sx,   (ry + rh) * sy],
+                ]))
+        all_pts = np.concatenate(pts_list, axis=0)
+
+        ih, iw = frame.shape[:2]
+        pad = 24
+        x0 = max(0, int(all_pts[:, 0].min()) - pad)
+        y0 = max(0, int(all_pts[:, 1].min()) - pad)
+        x1 = min(iw, int(all_pts[:, 0].max()) + pad)
+        y1 = min(ih, int(all_pts[:, 1].max()) + pad)
+        if x1 <= x0 or y1 <= y0:
+            return H
+
+        crop = frame[y0:y1, x0:x1]
+        self._show_frame(crop)
+        self._status("정렬 확인 중 — 라벨 영역 확대 표시 (잠시 후 검사 실행)")
+        return H
+
+    def _camroll_poll(self):
+        if not self._camroll_watching:
+            return
+        try:
+            current   = self._camroll_list_images(self._camroll_folder)
+            new_files = current - self._camroll_seen
+            if new_files:
+                full_paths = [os.path.join(self._camroll_folder, f) for f in new_files]
+                full_paths.sort(key=lambda p: os.path.getmtime(p))
+                newest = full_paths[-1]
+                self._camroll_seen = current
+                self._on_camroll_new_photo(newest)
+            else:
+                self._camroll_seen = current
+        except Exception as e:
+            self._status(f"카메라롤 감시 오류: {e}")
+        self._camroll_after_id = self.after(1500, self._camroll_poll)
+
+    def _on_camroll_new_photo(self, path, prev_size=None, stable_hits=0, retries=20):
+        """새 사진을 바로 열지 않고 파일 크기가 연속 2회 동일할 때까지 대기한다.
+        카메라 앱이 저해상도 미리보기를 먼저 저장하고 같은 경로에 고화질본으로
+        덮어쓰는 경우가 있어, 크기가 안정되기 전에 읽으면 저해상도 이미지가
+        검사에 쓰이는 문제가 있었다."""
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = None
+
+        if size is None or size == 0 or size != prev_size:
+            stable_hits = 0
+        else:
+            stable_hits += 1
+
+        if stable_hits < 2:
+            if retries > 0:
+                self.after(250, lambda: self._on_camroll_new_photo(
+                    path, size, stable_hits, retries - 1))
+            else:
+                self._status(f"카메라롤 사진 대기 시간 초과: {os.path.basename(path)}")
+            return
+
+        self._status(f"새 사진 감지됨: {os.path.basename(path)} — 로드 중...")
+        if not self._load_image_file(path):
+            if retries > 0:
+                self.after(300, lambda: self._on_camroll_new_photo(
+                    path, None, 0, retries - 1))
+            else:
+                self._status(f"카메라롤 사진 로드 실패: {os.path.basename(path)}")
+            return
+        if self.tmpl.loaded and str(self._btn_snap.cget("state")) == "normal":
+            self._preview_aligned_label(self.current_bgr)
+            self.after(1200, self._inspect)
+        else:
+            self._status(
+                f"사진 로드 완료: {os.path.basename(path)} (템플릿 없음 — 자동 검사 생략)")
 
     def _open_video(self, path):
         vcap = cv2.VideoCapture(path)
@@ -1254,17 +1591,22 @@ class App(tk.Tk):
         elif bgr.ndim == 3 and bgr.shape[2] == 4:
             bgr = bgr[:, :, :3]
 
-        # 캔버스 크기로 early downscale — 이후 모든 연산을 작은 이미지에서 수행
+        # 캔버스 크기(×확대 배율)로 early downscale — 이후 모든 연산을 이 크기에서 수행.
+        # 확대(zoom) 중에는 "캔버스 크기"가 아니라 "캔버스 크기×zoom"까지만 줄여야
+        # 나중에 zoom 크롭 시 이미 손실된 저해상도를 다시 확대하는 일이 없다.
         cw = self._canvas.winfo_width()
         ch = self._canvas.winfo_height()
+        if cw <= 1: cw = self.PREVIEW_W
+        if ch <= 1: ch = self.PREVIEW_H
+        fh0, fw0 = bgr.shape[:2]
+        target_w = min(fw0, cw * self._zoom)
+        target_h = min(fh0, ch * self._zoom)
         _ds = 1.0  # 오버레이 좌표 변환에 사용할 다운스케일 비율
-        if cw > 1 and ch > 1:
-            fh0, fw0 = bgr.shape[:2]
-            ds = min(cw / fw0, ch / fh0)
-            if ds < 0.95:
-                bgr = cv2.resize(bgr, (int(fw0 * ds), int(fh0 * ds)),
-                                 interpolation=cv2.INTER_AREA)
-                _ds = ds
+        ds = min(target_w / fw0, target_h / fh0)
+        if ds < 0.98:
+            bgr = cv2.resize(bgr, (max(1, int(fw0 * ds)), max(1, int(fh0 * ds))),
+                             interpolation=cv2.INTER_AREA)
+            _ds = ds
 
         rgb = cv2.cvtColor(bgr.copy(), cv2.COLOR_BGR2RGB)
 
@@ -1414,6 +1756,10 @@ class App(tk.Tk):
                 self.after(0, lambda: self._btn_snap.configure(text="분석 중..."))
                 frame = best
                 H = self._track_H
+                if H is None and self.tmpl.has_tracking:
+                    # 라이브 추적이 없는 정적/카메라롤 이미지: 해상도가 템플릿과
+                    # 달라도(예: 카메라 앱 고화질 사진) ORB 매칭으로 한 번 정합.
+                    H = self.tmpl.match_frame(frame)
                 region_results = self.tmpl.inspect(frame, H=H)
                 self.after(0, lambda: setattr(self, "_display_frozen", True))
                 self.after(0, lambda: self._on_result(region_results, frame))
@@ -1434,6 +1780,50 @@ class App(tk.Tk):
         self._txt.insert("end", msg, "ng")
         self._txt.configure(state="disabled")
 
+    def _auto_zoom_to_regions(self, frame):
+        """검사 완료 후 모든 검사 영역이 보이도록 자동으로 확대/이동.
+        self._zoom/_pan_x/_pan_y를 계산해 두면 뒤이은 _show_frame()의
+        기존 확대 파이프라인이 그대로 이 값을 사용해 렌더링한다."""
+        if not self.tmpl.loaded:
+            return
+        regs = self.tmpl.data.get("regions", [])
+        if not regs:
+            return
+
+        H = self._track_H
+        fh, fw = frame.shape[:2]
+        if H is not None:
+            pts_list = [TemplateManager.transform_corners(H, r["rect"]) for r in regs]
+        else:
+            tw, th = self.tmpl.data.get("img_size", [fw, fh])
+            sx = fw / tw if tw else 1.0
+            sy = fh / th if th else 1.0
+            pts_list = []
+            for r in regs:
+                rx, ry, rw, rh = r["rect"]
+                pts_list.append(np.array([
+                    [rx * sx,        ry * sy],
+                    [(rx+rw) * sx,   (ry+rh) * sy],
+                ]))
+        all_pts = np.concatenate(pts_list, axis=0)
+
+        x0 = float(all_pts[:, 0].min()); x1 = float(all_pts[:, 0].max())
+        y0 = float(all_pts[:, 1].min()); y1 = float(all_pts[:, 1].max())
+        bw = max(1.0, x1 - x0); bh = max(1.0, y1 - y0)
+        cx = (x0 + x1) / 2.0;   cy = (y0 + y1) / 2.0
+
+        pad = 1.15   # 여유 15%
+        zoom = min(fw / (bw * pad), fh / (bh * pad))
+        zoom = max(self._ZOOM_MIN, min(self._ZOOM_MAX, round(zoom, 1)))
+        self._zoom = zoom
+        self._lbl_zoom.configure(text=f"{self._zoom:.1f}×")
+
+        cw = self._canvas.winfo_width()  or self.PREVIEW_W
+        ch = self._canvas.winfo_height() or self.PREVIEW_H
+        ds = min(1.0, (cw * self._zoom) / fw, (ch * self._zoom) / fh)
+        self._pan_x = int((cx - fw / 2.0) * ds)
+        self._pan_y = int((cy - fh / 2.0) * ds)
+
     def _on_result(self, region_results, frame):
         try:
             self._btn_snap.configure(state="normal", text="🔍  검사 실행")
@@ -1447,10 +1837,10 @@ class App(tk.Tk):
                 sn_val  = sn_items[0]["value"].strip()
                 bar_val = bar_items[0]["value"].strip()
                 if sn_val and bar_val:
-                    from difflib import SequenceMatcher
-                    # OCR 오인식(T↔7, O↔0 등) 허용: 90% 이상 유사도면 일치로 판정
-                    match = (sn_val == bar_val or
-                             SequenceMatcher(None, sn_val, bar_val).ratio() >= 0.90)
+                    # S/N은 텍스트와 바코드 내용이 정확히 일치해야 pass.
+                    # OCR 오인식(T↔7 등)으로 다르게 나오면 실제 불일치이든 OCR
+                    # 오류이든 사람이 확인해야 하므로 유사도 허용 없이 NG 처리.
+                    match = (sn_val == bar_val)
                     for r in sn_items:
                         r["label"] = r.get("label", "S/N") + " (텍스트)"
                         r["ok"]    = match
@@ -1469,6 +1859,7 @@ class App(tk.Tk):
             }
             self.history.append(entry)
             self._render_result(entry)
+            self._auto_zoom_to_regions(frame)
             self._show_frame(frame, result_regions=region_results)
             self._lbl_verdict.configure(
                 text=f"[ {verdict} ]",
@@ -1941,6 +2332,24 @@ class App(tk.Tk):
                 tk.Label(d, text="유형 선택", font=FONT_SMALL,
                          fg=CLR["subtext"], bg=CLR["bg"]).pack(anchor="w", padx=12)
                 typ_var = tk.StringVar(value=r.get("type") or sel_type.get())
+
+                # 유형을 바꿨는데 라벨 입력창을 그대로 두면(이전 유형의 기본
+                # 라벨 텍스트가 남아있으면) 저장된 label이 실제 type과 어긋나는
+                # 버그가 있었다 — 라벨이 "이전 유형의 기본값 그대로"일 때만
+                # 새 유형의 기본값으로 자동 갱신(사용자가 직접 커스텀한 라벨은 보존).
+                _prev_type = [typ_var.get()]
+
+                def _on_type_change(*_a):
+                    old_default = _LBL.get(_prev_type[0], "")
+                    cur = e_label.get().strip()
+                    if not cur or cur == old_default:
+                        new_default = _LBL.get(typ_var.get(), typ_var.get())
+                        e_label.delete(0, "end")
+                        e_label.insert(0, new_default)
+                    _prev_type[0] = typ_var.get()
+
+                typ_var.trace_add("write", _on_type_change)
+
                 for val, lbl_text in _LBL.items():
                     row2 = tk.Frame(d, bg=CLR["bg"])
                     row2.pack(anchor="w", padx=16, pady=2)
@@ -2588,6 +2997,8 @@ class App(tk.Tk):
     def _on_close(self):
         if self._auto_after_id:
             self.after_cancel(self._auto_after_id)
+        if self._camroll_after_id:
+            self.after_cancel(self._camroll_after_id)
         self._save_config()
         self._stop_camera()
         self._stop_video()
